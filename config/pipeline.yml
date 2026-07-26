@@ -1,0 +1,14 @@
+# 流水线各阶段递归限制 (最大工具调用轮数)
+stage_recursion_limits:
+  stage_1: 10
+  stage_2: 8
+  stage_3: 12
+  stage_4: 8
+
+# 是否启用结构化输出提取失败后的降级解析
+structured_output_fallback: true
+
+# Kimi Context Caching (实验性): 将固定 system prompt 注册为上下文缓存以降低重复token开销
+# 仅 chat_provider=kimi 且 MOONSHOT_API_KEY 有效时生效; 失败自动降级为不缓存
+enable_prompt_cache: false
+

@@ -1,0 +1,9 @@
+# 推理模型提供方: dashscope(通义千问) / kimi(月之暗面)
+chat_provider: kimi
+
+# 各提供方的模型名
+dashscope_chat_model: qwen3-max
+kimi_chat_model: kimi-k2-0905-preview
+
+# 向量模型(固定使用阿里 DashScope)
+embedding_model_name: text-embedding-v4
