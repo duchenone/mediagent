@@ -242,3 +242,11 @@ v3.0.0 | 最后更新 2026-07-26
 - 多轮对话记忆（LangGraph Checkpointer）
 - 逐 token 流式输出、实时状态展示、手动停止
 - 工具全部基于真实病历数据实现
+
+### v1.0.0
+
+- 首个版本：ReAct 单 Agent 架构（LangChain）
+- 医学知识库 RAG 问答（ChromaDB + text-embedding）
+- 患者病历查询、生命体征、就诊科室等基础工具
+- 诊断报告生成（提示词切换）
+- Streamlit Web 界面
