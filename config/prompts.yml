@@ -3,5 +3,4 @@ rag_summarize_prompt_path : prompts/rag_summarize.txt
 report_prompt_path : prompts/report_prompt.txt
 pipeline_stage1_prompt_path : prompts/pipeline_stage1.txt
 pipeline_stage2_prompt_path : prompts/pipeline_stage2.txt
-pipeline_stage3_prompt_path : prompts/pipeline_stage3.txt
 pipeline_stage4_prompt_path : prompts/pipeline_stage4.txt

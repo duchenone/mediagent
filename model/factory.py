@@ -48,6 +48,12 @@ class ChatModelFactory(BaseModelFactory):
         if not api_key:
             raise ValueError(f'[ChatModelFactory]使用{provider}需在.env中配置{conf["env_key"]}')
 
+        # 统一容错参数: 超时 + 自动重试, 避免网络抖动直接终止整条流水线
+        resilience = {
+            'timeout': rag_conf.get('llm_timeout', 60),
+            'max_retries': rag_conf.get('llm_max_retries', 2),
+        }
+
         if provider == 'dashscope':
             # 使用ChatQwen, 解决ChatTongyi流式+工具调用arguments格式报错的问题
             return ChatQwen(
@@ -55,6 +61,7 @@ class ChatModelFactory(BaseModelFactory):
                 api_key=api_key,
                 base_url=conf['base_url'],
                 streaming=True,
+                **resilience,
             )
         # kimi 及其他 OpenAI 兼容提供方
         base_url = conf['base_url']
@@ -66,6 +73,7 @@ class ChatModelFactory(BaseModelFactory):
             api_key=api_key,
             base_url=base_url,
             streaming=True,
+            **resilience,
         )
 
 

@@ -1,1 +1,4 @@
 external_data_path: data/external/patient_records.csv
+
+# 单Agent模式对话历史裁剪预算(近似token数), 超出后按时间从旧到新裁剪
+max_history_tokens: 4000

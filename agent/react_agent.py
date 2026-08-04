@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 
 from langchain.agents import create_agent
 from langchain_core.tools import StructuredTool
@@ -15,7 +16,10 @@ from model.factory import chat_model
 from utils.prompt_loader import load_system_prompts
 from utils.logger_handler import logger
 from utils.path_tool import get_abs_path
-from agent.tools.middleware import monitor_tool, log_before_model, report_prompt_switch
+from agent.tools.middleware import (
+    monitor_tool, log_before_model, report_prompt_switch,
+    trim_history, medical_guardrail,
+)
 
 
 # ── MCP 工具加载(模块级单例, ReactAgent 与 PipelineAgent 共享同一 MCP 进程) ──
@@ -28,6 +32,9 @@ import threading as _threading
 _mcp_loop = asyncio.new_event_loop()
 _mcp_loop_thread = _threading.Thread(target=_mcp_loop.run_forever, daemon=True)
 _mcp_loop_thread.start()
+
+# get_mcp_tools 初始化锁: 双会话并发首次加载时只允许一个线程启动 MCP 子进程
+_mcp_init_lock = _threading.Lock()
 
 
 def _start_mcp_server() -> tuple[subprocess.Popen, str]:
@@ -59,43 +66,48 @@ def _start_mcp_server() -> tuple[subprocess.Popen, str]:
 
 def get_mcp_tools() -> list:
     """获取 MCP 工具列表(单例): 首次调用时启动 mcp_server 进程并加载工具,
-    后续调用直接返回缓存, 供 ReactAgent / PipelineAgent 共享同一进程."""
+    后续调用直接返回缓存, 供 ReactAgent / PipelineAgent 共享同一进程.
+    双重检查锁: 防止多会话并发首次初始化时重复拉起 MCP 子进程."""
     global _mcp_tools_cache, _mcp_server_proc
     if _mcp_tools_cache is not None:
         return _mcp_tools_cache
 
-    _mcp_server_proc, url = _start_mcp_server()
+    with _mcp_init_lock:
+        if _mcp_tools_cache is not None:
+            return _mcp_tools_cache
 
-    client = MultiServerMCPClient({
-        'mediagent': {
-            'transport': 'streamable_http',
-            'url': url,
-        }
-    })
-    mcp_tools = asyncio.run(client.get_tools())
+        _mcp_server_proc, url = _start_mcp_server()
 
-    def wrap(async_tool):
-        def sync_invoke(**kwargs):
-            result = asyncio.run_coroutine_threadsafe(
-                async_tool.ainvoke(kwargs), _mcp_loop
-            ).result()
-            if isinstance(result, list):
-                return ''.join(
-                    block.get('text', '')
-                    for block in result
-                    if isinstance(block, dict) and block.get('type') == 'text'
-                )
-            return result
+        client = MultiServerMCPClient({
+            'mediagent': {
+                'transport': 'streamable_http',
+                'url': url,
+            }
+        })
+        mcp_tools = asyncio.run(client.get_tools())
 
-        return StructuredTool.from_function(
-            func=sync_invoke,
-            name=async_tool.name,
-            description=async_tool.description,
-            args_schema=async_tool.args_schema,
-        )
+        def wrap(async_tool):
+            def sync_invoke(**kwargs):
+                result = asyncio.run_coroutine_threadsafe(
+                    async_tool.ainvoke(kwargs), _mcp_loop
+                ).result()
+                if isinstance(result, list):
+                    return ''.join(
+                        block.get('text', '')
+                        for block in result
+                        if isinstance(block, dict) and block.get('type') == 'text'
+                    )
+                return result
 
-    _mcp_tools_cache = [wrap(tool) for tool in mcp_tools]
-    return _mcp_tools_cache
+            return StructuredTool.from_function(
+                func=sync_invoke,
+                name=async_tool.name,
+                description=async_tool.description,
+                args_schema=async_tool.args_schema,
+            )
+
+        _mcp_tools_cache = [wrap(tool) for tool in mcp_tools]
+        return _mcp_tools_cache
 
 
 class ReactAgent:
@@ -104,10 +116,13 @@ class ReactAgent:
             model=chat_model,
             system_prompt=load_system_prompts(),
             tools=get_mcp_tools(),
-            middleware=[monitor_tool, log_before_model, report_prompt_switch],
+            middleware=[monitor_tool, log_before_model, report_prompt_switch,
+                        trim_history, medical_guardrail],
             # 内存检查点, 按thread_id保留对话历史, 支持持续多轮对话
             checkpointer=InMemorySaver(),
         )
+        # 每个实例(每个用户会话)独立 thread_id, 避免共享 Agent 时对话历史串话
+        self._thread_id = str(uuid.uuid4())
 
     # 工具名称 -> 动作描述, 用于向用户展示Agent当前正在做什么
     TOOL_ACTIONS = {
@@ -145,8 +160,8 @@ class ReactAgent:
         reported_tool_calls = set()
         try:
             # recursion_limit限制最大执行步数, 防止工具反复调用导致死循环, 超限后强制退出
-            # thread_id标识会话, 同一Agent实例(同一浏览器会话)共享对话历史
-            config = {'recursion_limit': 25, 'configurable': {'thread_id': 'default'}}
+            # thread_id标识会话, 每个ReactAgent实例独立, 同一实例内共享对话历史
+            config = {'recursion_limit': 25, 'configurable': {'thread_id': self._thread_id}}
             # stream_mode='messages': 逐token推送模型输出, 实现打字机效果的流式输出
             for message, _ in self.agent.stream(input_dict,stream_mode='messages',config=config):
 

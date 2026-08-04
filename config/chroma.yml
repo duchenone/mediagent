@@ -1,6 +1,6 @@
 collection_name : mediagent
 persist_directory : rag/chroma_db
-k :  3
+k :  5
 data_path : data
 md5_hex_store : md5.txt
 allow_knowledge_file_type : ["txt","pdf"]
@@ -8,3 +8,12 @@ allow_knowledge_file_type : ["txt","pdf"]
 chunk_size : 200
 chunk_overlap : 20
 separators : ["\n\n","。",".","?","？","!"," ",""]
+
+# ── 混合检索与重排序 ──
+# 召回阶段(BM25+向量各自召回后融合)的候选数, 重排后精选到 k 条
+fetch_k : 10
+enable_hybrid : true
+enable_rerank : true
+rerank_model : gte-rerank-v2
+# rerank 相关性分数阈值(0-1), 低于阈值的结果被过滤; 0 表示不过滤
+rerank_threshold : 0.0

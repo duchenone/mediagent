@@ -19,11 +19,13 @@ from langgraph.types import interrupt
 from agent.pipeline.pipeline_state import (
     PipelineState, DDxOutput, EvidenceOutput, EvidenceItem,
 )
-from utils.config_handler import agent_conf
+from utils.config_handler import agent_conf, load_pipeline_config
 from utils.path_tool import get_abs_path
 from utils.logger_handler import logger
 
 import csv, os
+
+_pipeline_conf = load_pipeline_config()
 
 # ── 阶段显示名称 ──
 STAGE_NAMES = {
@@ -34,12 +36,15 @@ STAGE_NAMES = {
     'stage_4': '报告生成',
 }
 
-# ── 各阶段子图的递归上限 (独立于父图, 防止单阶段工具调用死循环耗尽父图预算) ──
-STAGE_RECURSION_LIMITS = {
+# ── 各阶段子图的递归上限 (读 pipeline.yml, 独立于父图, 防止单阶段工具调用死循环耗尽父图预算) ──
+STAGE_RECURSION_LIMITS = _pipeline_conf.get('stage_recursion_limits') or {
     'stage_1': 12,
     'stage_2': 12,
     'stage_4': 8,
 }
+
+# ── 结构化解析失败时是否 fallback 独立 parser (pipeline.yml 开关) ──
+STRUCTURED_OUTPUT_FALLBACK = _pipeline_conf.get('structured_output_fallback', True)
 
 # ── 诊断名 → 专科映射 (Stage3 确定性分科, 与 data/ 子目录一致) ──
 DEPT_KEYWORDS = {
@@ -91,14 +96,15 @@ def _extract_json_block(text: str) -> dict | None:
 
 
 def _parse_output(parser, text: str, model_cls, stage_name: str):
-    """解析阶段输出: 先本地 JSON 提取(零LLM消耗), 失败才 fallback 独立 parser"""
+    """解析阶段输出: 先本地 JSON 提取(零LLM消耗), 失败才 fallback 独立 parser
+    (fallback 受 pipeline.yml 的 structured_output_fallback 开关控制)"""
     data = _extract_json_block(text)
     if data is not None:
         try:
             return model_cls.model_validate(data)
         except Exception as e:
             logger.warning(f'[{stage_name}] 本地JSON校验失败, 尝试parser: {e}')
-    if parser is None or not text.strip():
+    if not STRUCTURED_OUTPUT_FALLBACK or parser is None or not text.strip():
         return None
     try:
         return parser.invoke(f'请从以下{stage_name}结果中提取结构化数据:\n\n{text}')

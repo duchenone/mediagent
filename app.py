@@ -153,9 +153,13 @@ def interrupt_fragment(gen: dict):
             pipeline = st.session_state['pipeline_agent']
 
             def resume_pipeline(state: dict, pipe_agent, thread_id: str, value: str):
+                # stream.close() 真正终止生成: 关闭生成器使 GeneratorExit 传播到
+                # 底层 LangGraph/HTTP 流, 而非仅仅停止消费事件
+                stream = pipe_agent.resume_stream(thread_id, value)
                 try:
-                    for event in pipe_agent.resume_stream(thread_id, value):
+                    for event in stream:
                         if state['stop']:
+                            stream.close()
                             break
                         if not _handle_pipeline_event(event, state):
                             break
@@ -233,9 +237,11 @@ if prompt and not st.session_state.get('generating'):
         pipeline = st.session_state['pipeline_agent']
 
         def run_pipeline(query: str, state: dict, pipe_agent):
+            stream = pipe_agent.execute_stream(query)
             try:
-                for event in pipe_agent.execute_stream(query):
+                for event in stream:
                     if state['stop']:
+                        stream.close()  # 关闭生成器, 真正中断底层 LLM 流
                         break
                     if not _handle_pipeline_event(event, state):
                         break
@@ -249,9 +255,11 @@ if prompt and not st.session_state.get('generating'):
         agent = st.session_state['agent']
 
         def run_generation(query: str, state: dict, react_agent):
+            stream = react_agent.execute_stream(query)
             try:
-                for event in react_agent.execute_stream(query):
+                for event in stream:
                     if state['stop']:
+                        stream.close()  # 关闭生成器, 真正中断底层 LLM 流
                         break
                     if event['type'] == 'status':
                         state['status'] = event['text']

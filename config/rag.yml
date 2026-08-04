@@ -7,3 +7,7 @@ kimi_chat_model: kimi-k2-0905-preview
 
 # 向量模型(固定使用阿里 DashScope)
 embedding_model_name: text-embedding-v4
+
+# LLM 调用容错: 超时秒数与自动重试次数 (网络抖动不再直接终止流水线)
+llm_timeout: 60
+llm_max_retries: 2

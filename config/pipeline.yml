@@ -1,8 +1,8 @@
 # 流水线各阶段递归限制 (最大工具调用轮数)
+# 仅含 ReAct 子图阶段; stage_3 为纯代码节点, 无 agent 故无需配置
 stage_recursion_limits:
-  stage_1: 10
-  stage_2: 8
-  stage_3: 12
+  stage_1: 12
+  stage_2: 12
   stage_4: 8
 
 # 是否启用结构化输出提取失败后的降级解析

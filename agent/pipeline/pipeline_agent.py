@@ -29,7 +29,7 @@ from agent.pipeline.stage_nodes import (
     STAGE_NAMES,
 )
 from agent.pipeline.tool_sets import build_stage_tools, get_tool_by_name
-from agent.tools.middleware import monitor_tool, log_before_model
+from agent.tools.middleware import monitor_tool, log_before_model, medical_guardrail
 from utils.prompt_loader import load_pipeline_stage_prompt
 from utils.config_handler import load_pipeline_config, rag_conf
 from utils.logger_handler import logger
@@ -86,8 +86,11 @@ class PipelineAgent:
     def _build_stage_agent(self, prompt: str, tools: list, name: str):
         """构建单个 stage 的 ReAct Agent 子图 (纯文本输出, 结构化解析在节点层处理)
         enable_prompt_cache 且 provider=kimi 时, 尝试将 system prompt 注册为上下文缓存,
-        并通过中间件在每次模型调用的 messages 开头注入 cache 引用 (失败自动降级)"""
+        并通过中间件在每次模型调用的 messages 开头注入 cache 引用 (失败自动降级)
+        报告生成阶段(stage_4)额外挂载输出安全护栏, 涉及用药剂量时强制附加免责声明"""
         middlewares = [monitor_tool, log_before_model]
+        if name == 'stage_4_report':
+            middlewares.append(medical_guardrail)
         cache_id = self._prompt_cache_ids.get(name)
         if cache_id:
             from langchain.agents.middleware import wrap_model_call

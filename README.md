@@ -18,25 +18,29 @@
 - **智能医学问答**：基于医学知识库（RAG），提供专业的医学知识检索和问答
 - **辅助诊断**：获取患者基本信息、生命体征、就诊科室，辅助临床判断
 - **诊断报告生成**：正则匹配报告意图，确定性切换报告提示词
-- **多轮对话记忆**：基于 LangGraph Checkpointer 保留对话历史，支持持续追问
+- **多轮对话记忆**：基于 LangGraph Checkpointer 保留对话历史；`trim_history` 中间件超出 token 预算自动裁剪最早消息，防多轮膨胀
+- **输出安全护栏**：`medical_guardrail` 中间件检测到具体用药/剂量内容时，确定性附加免责声明（不依赖模型自觉遵守 prompt）
 
 ### 通用能力
 
-- **MCP 工具封装**：7 个专业医疗工具通过 MCP（Model Context Protocol）streamable-http 传输提供服务
+- **MCP 工具封装**：7 个专业医疗工具通过 MCP（Model Context Protocol）streamable-http 传输提供服务；子进程动态端口启动，双重检查锁保证多会话下单例安全
 - **专科 RAG 过滤**：知识库按 8 个专科组织（子目录名作 department 元数据），检索可按专科过滤
+- **混合检索 + 重排序**：BM25（jieba 中文分词）与向量双路召回经 EnsembleRetriever 融合，gte-rerank 精排名次与召回名次二次 RRF 融合，解决单一 rerank 模型对关键词型查询的排序偏差
+- **检索质量可度量**：`tests/` 内置 30 条专科评测集（含 10 条同义改写难例），一键对比基线与混合检索命中率
 - **双模型提供方**：推理模型支持 Kimi（月之暗面）/ 通义千问切换，嵌入固定用阿里 text-embedding-v4
 - **无闪屏流式 UI**：Streamlit fragment 局部刷新，生成过程页面稳定不闪烁
-- **手动停止生成**：生成过程中可随时中断
-- **容错兜底**：工具失败自动降级、阶段递归限制防死循环、结构化解析本地优先 + LLM parser 兜底
+- **手动停止生成**：关闭事件流生成器，真正中断底层 LLM 流（非仅停止显示）
+- **容错兜底**：工具失败自动降级、阶段递归限制防死循环、结构化解析本地优先 + LLM parser 兜底、LLM 调用统一超时 + 自动重试
 - **日志监控**：完整的工具调用和模型调用日志
 
 ## 技术栈
 
 | 类别 | 技术 |
 |------|------|
-| LLM框架 | LangChain + LangGraph（StateGraph 父子图、interrupt/resume、Checkpointer） |
+| LLM框架 | LangChain + LangGraph（StateGraph 父子图、interrupt/resume、Checkpointer、中间件体系） |
 | 推理模型 | Kimi（ChatOpenAI，sk-kimi- key 自动走 api.kimi.com/coding/v1）/ 通义千问（ChatQwen） |
 | 嵌入模型 | 阿里 text-embedding-v4（DashScope） |
+| 检索增强 | BM25（rank_bm25 + jieba）混合召回 + gte-rerank 重排（RRF 双序融合） |
 | 工具协议 | MCP（FastMCP + langchain-mcp-adapters，streamable-http） |
 | 向量数据库 | ChromaDB（department 元数据过滤） |
 | Web界面 | Streamlit（fragment 局部刷新） |
@@ -55,7 +59,7 @@ mediagent/
 │   │   └── tool_sets.py        # 各阶段工具子集
 │   └── tools/
 │       ├── agent_tools.py      # 医疗工具集（7个工具，全部基于真实数据）
-│       └── middleware.py       # 中间件（监控、日志）
+│       └── middleware.py       # 中间件(工具监控/日志/动态Prompt/记忆裁剪/安全护栏)
 ├── config/
 │   ├── agent.yml               # Agent 配置
 │   ├── chroma.yml              # ChromaDB 配置
@@ -71,12 +75,16 @@ mediagent/
 │   └── factory.py              # 模型工厂（按 key 前缀自动选择 Kimi 端点）
 ├── prompts/
 │   ├── main_prompt.txt         # 单 Agent 主提示词
-│   ├── pipeline_stage1~4.txt   # 流水线各阶段提示词
+│   ├── pipeline_stage1/2/4.txt # 流水线各阶段提示词(Stage3为纯代码节点, 无prompt)
 │   ├── rag_summarize.txt       # RAG 总结提示词
 │   └── report_prompt.txt       # 诊断报告提示词
 ├── rag/
-│   ├── rag_service.py          # RAG 服务（rag_summarize / rag_retrieve 轻量检索）
-│   └── vector_store.py         # 向量存储管理（递归加载、department 元数据、md5去重）
+│   ├── rag_service.py          # RAG 服务(混合召回 + rerank 的检索编排)
+│   ├── reranker.py             # gte-rerank 重排 + 召回/精排 RRF 双序融合
+│   └── vector_store.py         # 向量存储 + BM25语料(递归加载、department元数据、md5去重)
+├── tests/
+│   ├── eval_dataset.json       # 30条专科检索评测集(含10条同义改写难例)
+│   └── run_eval.py             # 评测脚本(--compare 对比朴素向量基线)
 ├── utils/
 │   ├── config_handler.py       # 配置加载器
 │   ├── prompt_loader.py        # 提示词加载器
@@ -175,15 +183,16 @@ chat_provider: kimi                      # 推理模型提供方: kimi / dashsco
 kimi_chat_model: kimi-k2-0905-preview    # Kimi 模型
 dashscope_chat_model: qwen3-max          # 通义千问模型
 embedding_model_name: text-embedding-v4  # 嵌入模型（固定阿里）
+llm_timeout: 60                          # LLM 调用超时(秒)
+llm_max_retries: 2                       # LLM 调用自动重试次数
 ```
 
 ### pipeline.yml
 
 ```yaml
-stage_recursion_limits:        # 各阶段最大工具调用轮数（防死循环）
-  stage_1: 10
-  stage_2: 8
-  stage_3: 12
+stage_recursion_limits:        # 各阶段最大工具调用轮数（防死循环; stage_3为纯代码节点无需配置）
+  stage_1: 12
+  stage_2: 12
   stage_4: 8
 structured_output_fallback: true   # 结构化解析失败时启用 LLM parser 兜底
 enable_prompt_cache: false         # Kimi Context Caching（实验性）
@@ -194,25 +203,44 @@ enable_prompt_cache: false         # Kimi Context Caching（实验性）
 ```yaml
 collection_name: mediagent
 persist_directory: rag/chroma_db
-k: 3
+k: 5                    # 最终返回分片数(重排精选后)
+fetch_k: 10             # 召回阶段候选数(BM25与向量各自召回后融合)
+enable_hybrid: true     # BM25+向量混合召回开关
+enable_rerank: true     # gte-rerank 重排开关(RRF双序融合)
+rerank_model: gte-rerank-v2
+rerank_threshold: 0.0   # rerank相关性分数阈值, 0表示不过滤
 data_path: data
 allow_knowledge_file_type: ["txt", "pdf"]
 chunk_size: 200
 chunk_overlap: 20
 ```
 
+## 检索质量评测
+
+内置 30 条专科评测集（8 个专科，含 10 条同义改写难例，如"慢阻肺"→COPD 指南、"近三个月平均血糖"→HbA1c）：
+
+```bash
+python tests/run_eval.py            # 评测当前配置(混合检索+重排)
+python tests/run_eval.py --compare  # 与优化前配置(朴素向量top-3)对比
+```
+
+当前结果：**命中率 100%（30/30），优化前基线 93.3%（28/30）**，混合检索+重排平均延迟 0.62s。
+报告自动写入 `tests/eval_report.md`。
+
 ## 容错机制
 
 - **工具失败兜底**：工具异常返回错误消息而非抛出，模型感知后兜底回复
-- **阶段递归限制**：每阶段独立 `recursion_limit`，超限强制退出
-- **结构化解析降级**：```json 本地正则提取 → Pydantic 校验 → LLM parser 兜底 → `stage_error` 终止（绝不跑错阶段）
-- **MCP 服务守护**：持久后台事件循环避免连接反复重建；子进程随主程序退出自动回收
+- **LLM 调用容错**：统一配置超时（60s）与自动重试（2 次），网络抖动不再直接终止流水线
+- **阶段递归限制**：每阶段独立 `recursion_limit`（pipeline.yml 可配），超限强制退出
+- **结构化解析降级**：```json 本地正则提取 → Pydantic 校验 → LLM parser 兜底（开关可控）→ `stage_error` 终止（绝不跑错阶段）
+- **MCP 服务守护**：持久后台事件循环避免连接反复重建；双重检查锁防多会话并发重复拉起子进程；子进程随主程序退出自动回收
+- **知识库一致性**：MD5 增量去重 + 文件更新时按来源清理旧分片，避免新旧知识并存
 
 ## 安全声明
 
 - 本系统为AI辅助诊断工具，**不能替代医生的专业诊断和判断**
 - 所有诊疗决策需由执业医师结合临床实际情况作出
-- 药物建议需在医生指导下使用
+- 药物建议需在医生指导下使用；系统内置输出安全护栏，检测到具体用药/剂量内容时自动附加免责声明
 - 涉及急重症症状时，系统会建议立即就医
 
 ## 许可证
@@ -221,7 +249,19 @@ MIT License
 
 ## 版本
 
-v3.0.0 | 最后更新 2026-07-26
+v3.1.0 | 最后更新 2026-08-03
+
+### v3.1.0 更新内容
+
+- RAG 检索升级：BM25(jieba) + 向量混合召回，gte-rerank 精排与召回名次 RRF 二次融合
+- 新增检索质量评测集（30 条专科用例含同义改写难例）与评测脚本，命中率 93.3% → 100%
+- 新增输出安全护栏中间件（用药/剂量内容自动附加免责声明）
+- 新增长对话记忆裁剪中间件（trim_messages，防 token 线性膨胀）
+- LLM 调用统一超时 + 自动重试
+- MCP 工具单例加载加双重检查锁，修复多会话并发初始化竞态
+- "停止生成"改为真正关闭事件流（中断底层 LLM 连接）
+- 清理死代码/死配置（stage_recursion_limits 与 structured_output_fallback 配置真正生效）
+- 知识库更新时按来源清理旧分片，修复 MD5 去重"只增不改"
 
 ### v3.0.0 更新内容
 

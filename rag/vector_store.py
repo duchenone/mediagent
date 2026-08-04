@@ -22,11 +22,14 @@ class VectorStoreService:
             separators=chroma_conf['separators'],
             length_function=len,
         )
+        # BM25 语料缓存: {department过滤条件: [Document,...]}, 入库新文档时失效
+        self._corpus_cache: dict = {}
 
-    def get_retriever(self,department: str | list[str] | None = None):
-        """获取检索器,可按专科(department元数据)过滤
-        department: 专科名称(如'心血管内科')或专科列表,None/空则全库检索"""
-        search_kwargs: dict = {'k':chroma_conf['k']}
+    def get_retriever(self, department: str | list[str] | None = None, k: int | None = None):
+        """获取向量检索器,可按专科(department元数据)过滤
+        department: 专科名称(如'心血管内科')或专科列表,None/空则全库检索
+        k: 召回条数, 默认取配置 chroma.k; 混合检索场景传入 fetch_k 扩大召回"""
+        search_kwargs: dict = {'k': k or chroma_conf['k']}
         if department:
             departments = [department] if isinstance(department,str) else list(department)
             if len(departments) == 1:
@@ -34,6 +37,42 @@ class VectorStoreService:
             else:
                 search_kwargs['filter'] = {'department':{'$in':departments}}
         return self.vector_store.as_retriever(search_kwargs=search_kwargs)
+
+    def _corpus(self, department: str | list[str] | None = None) -> list[Document]:
+        """从 Chroma 拉取全量分片(可按专科过滤), 作为 BM25 的内存语料, 结果带缓存"""
+        cache_key = str(department or 'ALL')
+        if cache_key not in self._corpus_cache:
+            raw = self.vector_store.get(include=['documents', 'metadatas'])
+            docs = [
+                Document(page_content=text, metadata=meta or {})
+                for text, meta in zip(raw['documents'], raw['metadatas'])
+            ]
+            if department:
+                departments = {department} if isinstance(department, str) else set(department)
+                docs = [d for d in docs if d.metadata.get('department') in departments]
+            self._corpus_cache[cache_key] = docs
+        return self._corpus_cache[cache_key]
+
+    def get_hybrid_retriever(self, department: str | list[str] | None = None):
+        """BM25(关键词) + 向量(语义) 混合检索器, EnsembleRetriever 等权融合.
+        向量语义检索对'同义不同词'鲁棒, BM25 对疾病/药品专有名词精确匹配,
+        两者互补提升召回率; 语料为空时降级为纯向量检索"""
+        import jieba
+        from langchain_community.retrievers import BM25Retriever
+        from langchain_classic.retrievers import EnsembleRetriever
+
+        fetch_k = chroma_conf.get('fetch_k', 10)
+        corpus = self._corpus(department)
+        if not corpus:
+            return self.get_retriever(department, k=fetch_k)
+        bm25 = BM25Retriever.from_documents(
+            corpus, preprocess_func=lambda text: list(jieba.lcut(text)),
+        )
+        bm25.k = fetch_k
+        return EnsembleRetriever(
+            retrievers=[bm25, self.get_retriever(department, k=fetch_k)],
+            weights=[0.5, 0.5],
+        )
 
     def load_document(self):
         """从数据文件夹内读取数据文件,转为向量存入向量库
@@ -92,7 +131,11 @@ class VectorStoreService:
                 department = get_department(path)
                 for doc in split_document:
                     doc.metadata['department'] = department
+                # 内容变更过的文件(MD5未记录但同来源可能已有旧分片):
+                # 先按来源删除旧分片再入库, 避免新旧知识并存、重复检索
+                self.vector_store.delete(where={'source': path})
                 self.vector_store.add_documents(split_document)
+                self._corpus_cache.clear()  # 语料变更, BM25缓存失效
                 save_md5_hex(md5_hex)
                 logger.info(f'[加载知识库]{path} 内容加载成功,专科标签: {department}')
             except Exception as e:

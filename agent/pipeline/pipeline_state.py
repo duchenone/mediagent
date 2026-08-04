@@ -1,6 +1,6 @@
 """PipelineAgent 状态与阶段间结构化输出模型"""
 
-from typing import Annotated, Any
+from typing import Annotated
 from typing_extensions import TypedDict
 
 from langgraph.graph.message import add_messages
@@ -45,7 +45,8 @@ class PipelineState(TypedDict):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 阶段间结构化输出模型 (用于 create_agent 的 response_format)
+# 阶段间结构化输出模型 (节点层本地解析 ```json → Pydantic 校验,
+# 失败才 fallback chat_model.with_structured_output parser)
 # ═══════════════════════════════════════════════════════════════
 
 class SOAPOutput(BaseModel):
@@ -86,46 +87,3 @@ class EvidenceItem(BaseModel):
 class EvidenceOutput(BaseModel):
     """Stage3 输出: 所有 DDx 候选的证据包集合"""
     bundles: list[EvidenceItem] = Field(description="每个DDx候选一个证据包")
-
-
-class ReportOutput(BaseModel):
-    """Stage4 输出: 最终诊断报告"""
-    markdown_report: str = Field(description="完整Markdown格式诊断报告")
-    key_findings_summary: str = Field(description="关键发现一句话摘要")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 结构化输出提取工具
-# ═══════════════════════════════════════════════════════════════
-
-def extract_structured_output(result: dict, model_cls: type[BaseModel]) -> Any | None:
-    """从 agent 结果中提取 response_format 结构化输出.
-
-    优先级:
-    1. result['structured_response'] — create_agent 的 response_format 模式直接存入此字段
-    2. result['messages'] 最后一条 AIMessage 的 tool_calls — 某些模型/版本的兼容路径
-    3. result['messages'] 最后一条 AIMessage 的 content — 纯文本降级(用于 Stage4 报告)
-    """
-    # 方式一: create_agent 的 structured_response 字段 (最可靠)
-    structured = result.get('structured_response')
-    if structured is not None:
-        if isinstance(structured, model_cls):
-            return structured
-        if isinstance(structured, dict):
-            return model_cls.model_validate(structured)
-
-    # 方式二: 倒序搜索 messages 中的 respond tool_call
-    model_name = model_cls.__name__  # e.g. "SOAPOutput"
-    messages = result.get('messages', [])
-    for msg in reversed(messages):
-        tool_calls = getattr(msg, 'tool_calls', None) or []
-        for tc in tool_calls:
-            name = tc.get('name', '')
-            if name in ('respond', 'structured_response', 'Respond',
-                        'generate_structured_response', '__respond__',
-                        model_name):  # ChatQwen 使用 Pydantic 类名作为 tool name
-                args = tc.get('args', {})
-                if args:
-                    return model_cls.model_validate(args)
-
-    return None
