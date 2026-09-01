@@ -6,21 +6,21 @@ load_dotenv()
 import streamlit as st
 from agent.react_agent import ReactAgent
 from agent.pipeline import PipelineAgent
+from utils.routing import PIPELINE_ROUTE_PATTERN, PATIENT_ID_PATTERN
 
 st.set_page_config(page_title='智诊通', page_icon='🏥', layout='wide')
 st.title('🏥 智诊通 —— 医疗辅助诊断智能体系统')
 
-# ── 侧边栏: 模式选择 ──
+# 流水线路由: PIPELINE_ROUTE_PATTERN(诊断/报告诉求) 或 PATIENT_ID_PATTERN(患者ID)
+# 命中即自动进入4阶段流水线, 确定性规则不经LLM判断; 普通医学问答由单Agent处理
+# (正则统一定义在 utils/routing.py)
+
+# ── 侧边栏: 智能路由说明 ──
 with st.sidebar:
-    st.header('⚙️ Agent 模式')
-    mode = st.radio(
-        '选择诊断模式',
-        ['单 Agent 模式 (通用对话)', '流水线模式 (结构化诊断)'],
-        index=0,
-        help='单Agent适合快速问答; 流水线模式自动走完 病历采集→鉴别诊断→证据检索→报告生成 全流程',
-    )
+    st.header('⚙️ 智能路由')
+    st.caption('输入 **患者ID**（如 "P1001 头疼三天"）或 **诊断/报告诉求** 自动进入 **4阶段流水线诊断**；'
+               '普通医学问答由 **单Agent** 处理。两种模式的执行进度都会实时显示在此处。')
     st.divider()
-    st.caption('流水线模式通过4个专业Agent协作,\n产出结构化Markdown诊断报告。')
 
 st.divider()
 
@@ -39,9 +39,10 @@ for message in st.session_state['messages']:
     st.chat_message(message['role']).write(message['content'])
 
 # 用户输入
-is_pipeline = mode == '流水线模式 (结构化诊断)'
-input_placeholder = '请输入（流水线模式: 建议包含患者ID+主诉,如 P1001 胸痛3天）' if is_pipeline else '请输入您的医学问题...'
-prompt = st.chat_input(placeholder=input_placeholder, disabled=bool(st.session_state.get('generating')))
+prompt = st.chat_input(
+    placeholder='请输入医学问题（含患者ID+诊断诉求将自动进入流水线诊断，如 P1001 胸痛3天）',
+    disabled=bool(st.session_state.get('generating')),
+)
 
 
 # ── 流水线进度 + 中间产物渲染 ──
@@ -92,6 +93,8 @@ def _handle_pipeline_event(event: dict, state: dict):
     elif t == 'stage_enter':
         state['pipeline_stage'] = event['stage']
         state['pipeline_status_text'] = event['text']
+        # 阶段进入即在主区域显示"进行中", 避免长LLM调用期间主区域空白
+        state['status'] = f"{event['text']}，进行中..."
     elif t == 'stage_done':
         state['pipeline_stages_done'].append(event['stage'])
         state['pipeline_status_text'] = event['text']
@@ -180,19 +183,31 @@ def interrupt_fragment(gen: dict):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Fragment: 侧边栏进度轮询 (fragment 内不允许 st.sidebar 上下文,
+# 故单独抽出, 在 with st.sidebar 中调用; 流水线显示阶段推进, 单Agent显示工具轨迹)
+# ═══════════════════════════════════════════════════════════════
+@st.fragment(run_every=0.4)
+def sidebar_progress_fragment(gen: dict):
+    st.divider()
+    if gen.get('pipeline_mode'):
+        st.subheader('🔄 流水线进度')
+        render_pipeline_progress(gen)
+    else:
+        st.subheader('🤖 Agent 进度')
+        steps = gen.get('steps', [])
+        st.markdown('\n\n'.join(steps[-8:]) if steps else '⏳ 思考中...')
+
+
+# ═══════════════════════════════════════════════════════════════
 # Fragment: 生成轮询区 (仅此区域 0.4s 局部刷新, 整页不再闪屏)
 # ═══════════════════════════════════════════════════════════════
 @st.fragment(run_every=0.4)
-def generation_fragment(gen: dict, pipeline_mode: bool):
+def generation_fragment(gen: dict):
     ai_box = st.chat_message('ai').empty()
+    pipeline_mode = gen.get('pipeline_mode', False)
 
     if not gen['done']:
         if pipeline_mode:
-            with st.sidebar:
-                st.divider()
-                st.subheader('🔄 流水线进度')
-                render_pipeline_progress(gen)
-
             display = ''.join(gen['chunks'])
             if gen['status']:
                 display += f'\n\n{gen["status"]}'
@@ -224,9 +239,15 @@ if prompt and not st.session_state.get('generating'):
     st.chat_message('user').write(prompt)
     st.session_state['messages'].append({'role': 'user', 'content': prompt})
 
+    # 确定性意图路由: 含患者ID 或 命中诊断/报告意图 → 流水线; 否则 → 单Agent
+    is_pipeline = bool(PIPELINE_ROUTE_PATTERN.search(prompt) or PATIENT_ID_PATTERN.search(prompt))
+
     gen = {'chunks': [], 'status': None, 'tool_result': None, 'done': False, 'error': None, 'stop': False,
+           'pipeline_mode': is_pipeline, 'steps': [],
            'pipeline_stage': None, 'pipeline_stages_done': [], 'pipeline_status_text': '',
            'artifacts': [], 'thread_id': None, 'interrupt': None, 'awaiting_input': False}
+    gen['steps'].append('🔀 已自动路由到 **流水线诊断模式**' if is_pipeline
+                        else '🔀 已自动路由到 **单Agent问答模式**')
     st.session_state['gen'] = gen
     st.session_state['generating'] = True
 
@@ -263,6 +284,7 @@ if prompt and not st.session_state.get('generating'):
                         break
                     if event['type'] == 'status':
                         state['status'] = event['text']
+                        state['steps'].append(event['text'])  # 侧边栏进度轨迹
                     elif event['type'] == 'tool_result':
                         state['tool_result'] = event['text']
                         state['status'] = None
@@ -280,13 +302,15 @@ if prompt and not st.session_state.get('generating'):
     st.rerun()
 
 
-# ── 生成中: 按状态分发到对应 fragment ──
+# ── 生成中: 按状态分发到对应 fragment (模式以提交时的路由结果为准) ──
 if st.session_state.get('generating'):
     gen = st.session_state['gen']
-    if is_pipeline and gen.get('awaiting_input') and gen.get('interrupt'):
+    if gen.get('pipeline_mode') and gen.get('awaiting_input') and gen.get('interrupt'):
         interrupt_fragment(gen)
     elif not gen['done']:
-        generation_fragment(gen, is_pipeline)
+        with st.sidebar:
+            sidebar_progress_fragment(gen)
+        generation_fragment(gen)
     else:
         _finalize(gen)
         st.rerun()

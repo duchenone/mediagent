@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import concurrent.futures
 import os
 import socket
 import subprocess
@@ -12,7 +13,8 @@ from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
-from model.factory import chat_model
+from model.factory import get_chat_model
+from utils.config_handler import agent_conf
 from utils.prompt_loader import load_system_prompts
 from utils.logger_handler import logger
 from utils.path_tool import get_abs_path
@@ -84,13 +86,26 @@ def get_mcp_tools() -> list:
                 'url': url,
             }
         })
-        mcp_tools = asyncio.run(client.get_tools())
+        # 工具加载也走统一后台事件循环, 避免混用 asyncio.run() 的临时 loop
+        mcp_tools = asyncio.run_coroutine_threadsafe(
+            client.get_tools(), _mcp_loop
+        ).result(timeout=60)
+
+        # 单次工具调用超时: MCP子进程卡死时不再无限阻塞, 由 monitor_tool 转为工具错误消息
+        tool_timeout = agent_conf.get('mcp_tool_timeout', 60)
 
         def wrap(async_tool):
             def sync_invoke(**kwargs):
-                result = asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     async_tool.ainvoke(kwargs), _mcp_loop
-                ).result()
+                )
+                try:
+                    result = future.result(timeout=tool_timeout)
+                except concurrent.futures.TimeoutError:
+                    future.cancel()
+                    raise TimeoutError(
+                        f'工具{async_tool.name}调用超过{tool_timeout}秒未返回, 已超时中断'
+                    )
                 if isinstance(result, list):
                     return ''.join(
                         block.get('text', '')
@@ -113,7 +128,7 @@ def get_mcp_tools() -> list:
 class ReactAgent:
     def __init__(self):
         self.agent = create_agent(
-            model=chat_model,
+            model=get_chat_model(),
             system_prompt=load_system_prompts(),
             tools=get_mcp_tools(),
             middleware=[monitor_tool, log_before_model, report_prompt_switch,

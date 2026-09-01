@@ -6,14 +6,14 @@ from utils.config_handler import chroma_conf
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from utils.path_tool import get_abs_path
 from utils.logger_handler import logger
-from model.factory import embed_model
+from model.factory import get_embed_model
 
 
 class VectorStoreService:
     def __init__(self):
         self.vector_store = Chroma(
             collection_name=chroma_conf['collection_name'],
-            embedding_function=embed_model,
+            embedding_function=get_embed_model(),
             persist_directory=get_abs_path(chroma_conf['persist_directory']),
         )
         self.spliter = RecursiveCharacterTextSplitter(
@@ -24,6 +24,8 @@ class VectorStoreService:
         )
         # BM25 语料缓存: {department过滤条件: [Document,...]}, 入库新文档时失效
         self._corpus_cache: dict = {}
+        # BM25 索引缓存: {department过滤条件: BM25Retriever}, 避免每次查询 jieba 重分词整个语料
+        self._bm25_cache: dict = {}
 
     def get_retriever(self, department: str | list[str] | None = None, k: int | None = None):
         """获取向量检索器,可按专科(department元数据)过滤
@@ -56,18 +58,24 @@ class VectorStoreService:
     def get_hybrid_retriever(self, department: str | list[str] | None = None):
         """BM25(关键词) + 向量(语义) 混合检索器, EnsembleRetriever 等权融合.
         向量语义检索对'同义不同词'鲁棒, BM25 对疾病/药品专有名词精确匹配,
-        两者互补提升召回率; 语料为空时降级为纯向量检索"""
-        import jieba
-        from langchain_community.retrievers import BM25Retriever
+        两者互补提升召回率; 语料为空时降级为纯向量检索.
+        BM25 索引按 department 缓存, 语料变更(load_document)时才重建"""
         from langchain_classic.retrievers import EnsembleRetriever
 
         fetch_k = chroma_conf.get('fetch_k', 10)
-        corpus = self._corpus(department)
-        if not corpus:
-            return self.get_retriever(department, k=fetch_k)
-        bm25 = BM25Retriever.from_documents(
-            corpus, preprocess_func=lambda text: list(jieba.lcut(text)),
-        )
+        cache_key = str(department or 'ALL')
+        bm25 = self._bm25_cache.get(cache_key)
+        if bm25 is None:
+            import jieba
+            from langchain_community.retrievers import BM25Retriever
+
+            corpus = self._corpus(department)
+            if not corpus:
+                return self.get_retriever(department, k=fetch_k)
+            bm25 = BM25Retriever.from_documents(
+                corpus, preprocess_func=lambda text: list(jieba.lcut(text)),
+            )
+            self._bm25_cache[cache_key] = bm25
         bm25.k = fetch_k
         return EnsembleRetriever(
             retrievers=[bm25, self.get_retriever(department, k=fetch_k)],
@@ -135,7 +143,8 @@ class VectorStoreService:
                 # 先按来源删除旧分片再入库, 避免新旧知识并存、重复检索
                 self.vector_store.delete(where={'source': path})
                 self.vector_store.add_documents(split_document)
-                self._corpus_cache.clear()  # 语料变更, BM25缓存失效
+                self._corpus_cache.clear()  # 语料变更, BM25语料与索引缓存失效
+                self._bm25_cache.clear()
                 save_md5_hex(md5_hex)
                 logger.info(f'[加载知识库]{path} 内容加载成功,专科标签: {department}')
             except Exception as e:

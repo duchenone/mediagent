@@ -13,11 +13,15 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from utils.logger_handler import logger
 from utils.config_handler import agent_conf
 from utils.prompt_loader import load_system_prompts,load_report_prompts
+from utils.routing import REPORT_PATTERN
 
-# 诊断报告意图正则: 直接匹配用户输入, 确保100%确定性切换, 不依赖LLM调用工具
-REPORT_PATTERN = re.compile(
-    r'(诊断报告|报告生成|生成.{0,6}报告|出具.{0,6}报告|撰写.{0,6}报告|写.{0,6}报告|做.{0,6}报告)'
-)
+
+def _preview(text, limit: int = 50) -> str:
+    """日志脱敏: 只保留前limit字符, 避免完整问诊/主诉内容落盘"""
+    if not isinstance(text, str):
+        return '<非文本内容>'
+    text = text.strip()
+    return text[:limit] + ('...' if len(text) > limit else '')
 
 
 # 工具执行的监控
@@ -27,7 +31,7 @@ def monitor_tool(
         handler: Callable[[ToolCallRequest],ToolMessage | Command]
 ) -> ToolMessage | Command:
     logger.info(f'[monitor_tool]执行工具: {request.tool_call["name"]}')
-    logger.info(f'[monitor_tool]参入参数: {request.tool_call["args"]}')
+    logger.debug(f'[monitor_tool]传入参数: {_preview(str(request.tool_call["args"]), 100)}')
     try:
         result =  handler(request)
         logger.info(f'[monitor_tool]工具{request.tool_call["name"]}调用成功')
@@ -48,7 +52,8 @@ def log_before_model(
         runtime: Runtime,
 ):
     logger.info(f'[log_before_model]即将调用模型, 带有{len(state['messages'])}条消息.')
-    logger.debug(f'[log_before_model]{type(state['messages'][-1]).__name__} | {state['messages'][-1].content.strip()}')
+    last = state['messages'][-1]
+    logger.debug(f'[log_before_model]{type(last).__name__} | {_preview(getattr(last, "content", ""))}')
     return None
 
 # 动态切换提示词, 在每一次生成提示词之前,调用此函数

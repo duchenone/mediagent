@@ -80,8 +80,6 @@ class EvidenceItem(BaseModel):
     diagnosis: str = Field(description="诊断名称")
     department_used: str = Field(description="检索时使用的 department 参数")
     guideline_summary: str = Field(description="从知识库检索到的指南证据摘要")
-    diagnostic_criteria: str = Field(description="关键诊断标准")
-    recommended_tests: str = Field(description="建议进一步检查")
 
 
 class EvidenceOutput(BaseModel):

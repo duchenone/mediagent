@@ -1,21 +1,13 @@
-from abc import ABC, abstractmethod
 import os
-from typing import Optional
-from langchain_core.embeddings import Embeddings
-from langchain_community.chat_models.tongyi import BaseChatModel
+from functools import lru_cache
+
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_qwq import ChatQwen
 from utils.config_handler import rag_conf
 
 
-class BaseModelFactory(ABC):
-    @abstractmethod
-    def generator(self) -> Optional[Embeddings | BaseChatModel]:
-        pass
-
-
-class ChatModelFactory(BaseModelFactory):
+class ChatModelFactory:
     """推理模型工厂: 按 chat_provider 配置切换提供方
     - dashscope: 通义千问 (ChatQwen, OpenAI兼容接口)
     - kimi: 月之暗面 Kimi (ChatOpenAI 指向 Moonshot OpenAI兼容接口)
@@ -37,7 +29,7 @@ class ChatModelFactory(BaseModelFactory):
         },
     }
 
-    def generator(self) -> Optional[Embeddings | BaseChatModel]:
+    def generator(self):
         provider = rag_conf.get('chat_provider', 'dashscope')
         conf = self.PROVIDERS.get(provider)
         if conf is None:
@@ -77,11 +69,26 @@ class ChatModelFactory(BaseModelFactory):
         )
 
 
-class EmbeddingsFactory(BaseModelFactory):
-    def generator(self) -> Optional[Embeddings | BaseChatModel]:
+class EmbeddingsFactory:
+    def generator(self):
         return DashScopeEmbeddings(model=rag_conf["embedding_model_name"])
 
 
-chat_model = ChatModelFactory().generator()
+# 懒加载单例: import 本模块不再要求 API key 就绪, 首次使用时才实例化
+@lru_cache(maxsize=1)
+def get_chat_model():
+    return ChatModelFactory().generator()
 
-embed_model = EmbeddingsFactory().generator()
+
+@lru_cache(maxsize=1)
+def get_embed_model():
+    return EmbeddingsFactory().generator()
+
+
+def __getattr__(name: str):
+    """兼容旧代码的 from model.factory import chat_model / embed_model (PEP 562)"""
+    if name == 'chat_model':
+        return get_chat_model()
+    if name == 'embed_model':
+        return get_embed_model()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

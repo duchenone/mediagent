@@ -5,7 +5,7 @@ from rag.reranker import rerank_docs
 from utils.prompt_loader import load_rag_prompts
 from utils.config_handler import chroma_conf
 from langchain_core.prompts import PromptTemplate
-from model.factory import chat_model
+from model.factory import get_chat_model
 
 
 class RagSummarizeService(object):
@@ -13,7 +13,7 @@ class RagSummarizeService(object):
         self.vector_store = VectorStoreService()
         self.prompt_text = load_rag_prompts()
         self.prompt_template = PromptTemplate.from_template(self.prompt_text)
-        self.model = chat_model
+        self.model = get_chat_model()
         self.chain = self._init_chain()
 
     def _init_chain(self):

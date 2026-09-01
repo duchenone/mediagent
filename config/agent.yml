@@ -2,3 +2,6 @@ external_data_path: data/external/patient_records.csv
 
 # 单Agent模式对话历史裁剪预算(近似token数), 超出后按时间从旧到新裁剪
 max_history_tokens: 4000
+
+# 单次MCP工具调用超时(秒), 超时后作为工具错误返回给模型, 不再无限阻塞
+mcp_tool_timeout: 60

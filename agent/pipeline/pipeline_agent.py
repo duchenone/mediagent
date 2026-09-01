@@ -17,7 +17,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from langchain.agents import create_agent
 
-from model.factory import chat_model
+from model.factory import get_chat_model
 from agent.pipeline.pipeline_state import (
     PipelineState,
     SOAPOutput, DDxOutput,
@@ -30,9 +30,13 @@ from agent.pipeline.stage_nodes import (
 )
 from agent.pipeline.tool_sets import build_stage_tools, get_tool_by_name
 from agent.tools.middleware import monitor_tool, log_before_model, medical_guardrail
+from agent.react_agent import ReactAgent
 from utils.prompt_loader import load_pipeline_stage_prompt
 from utils.config_handler import load_pipeline_config, rag_conf
 from utils.logger_handler import logger
+
+# 工具名称 -> 动作描述 (复用 ReactAgent 的映射, 供 Stage1/2 工具调用状态展示)
+TOOL_ACTIONS = ReactAgent.TOOL_ACTIONS
 
 
 class PipelineAgent:
@@ -59,6 +63,7 @@ class PipelineAgent:
         self._rag_tool = get_tool_by_name('rag_retrieve')
 
         # 结构化解析器 (仅作本地JSON提取失败时的 fallback)
+        chat_model = get_chat_model()
         self._soap_parser = chat_model.with_structured_output(SOAPOutput)
         self._ddx_parser = chat_model.with_structured_output(DDxOutput)
 
@@ -103,7 +108,7 @@ class PipelineAgent:
 
             middlewares.append(inject_cache)
         return create_agent(
-            model=chat_model,
+            model=get_chat_model(),
             system_prompt=prompt,
             tools=tools,
             middleware=middlewares,
@@ -258,16 +263,22 @@ class PipelineAgent:
         try:
             # stream_mode 混合: updates(节点状态更新) + messages(子图内LLM token)
             # subgraphs=True 使子图(各stage agent)事件也向上传播, namespace 标识来源节点
+            reported_tool_calls = set()  # (stage, tool_call_id) 去重, 避免流式chunk重复上报
             for ns, mode, chunk in self.graph.stream(
                 input_or_command,
                 stream_mode=['updates', 'messages'],
                 config=config,
                 subgraphs=True,
             ):
-                # ── messages: 仅转发 Stage4 的报告生成 token (逐字流式) ──
+                # ── messages: 子图内 LLM 活动 ──
                 if mode == 'messages':
-                    if ns and str(ns[0]).split(':')[0] == 'stage_4':
-                        message_chunk, _metadata = chunk
+                    if not ns:
+                        continue
+                    stage_key = str(ns[0]).split(':')[0]
+                    message_chunk, _metadata = chunk
+
+                    # Stage4: 报告 token 逐字推送
+                    if stage_key == 'stage_4':
                         content = getattr(message_chunk, 'content', '')
                         if isinstance(content, list):
                             content = ''.join(
@@ -277,6 +288,23 @@ class PipelineAgent:
                         if content and getattr(message_chunk, 'type', '') in ('AIMessageChunk', 'ai'):
                             report_streamed = True
                             yield {'type': 'content', 'text': content}
+                        continue
+
+                    # Stage1/2: 透传工具调用为实时状态, 避免长工具调用期间主区域无反馈
+                    tool_calls = getattr(message_chunk, 'tool_call_chunks', None) or [
+                        {'name': tc['name'], 'id': tc['id']}
+                        for tc in getattr(message_chunk, 'tool_calls', None) or []
+                    ]
+                    for tool_call in tool_calls:
+                        key = (stage_key, tool_call.get('id'))
+                        if tool_call.get('name') and key not in reported_tool_calls:
+                            reported_tool_calls.add(key)
+                            action = TOOL_ACTIONS.get(tool_call['name'], f'调用工具{tool_call["name"]}')
+                            yield {
+                                'type': 'stage_status',
+                                'stage': stage_key,
+                                'text': f"⏳ {STAGE_NAMES.get(stage_key, stage_key)}: 正在{action}...",
+                            }
                     continue
 
                 # ── updates: 只处理父图(namespace为空)的节点更新 ──

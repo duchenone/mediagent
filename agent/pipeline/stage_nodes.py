@@ -19,11 +19,10 @@ from langgraph.types import interrupt
 from agent.pipeline.pipeline_state import (
     PipelineState, DDxOutput, EvidenceOutput, EvidenceItem,
 )
-from utils.config_handler import agent_conf, load_pipeline_config
-from utils.path_tool import get_abs_path
+from agent.tools.patient_records import list_patient_ids
+from utils.config_handler import load_pipeline_config
 from utils.logger_handler import logger
-
-import csv, os
+from utils.routing import DEPT_KEYWORDS, PATIENT_ID_PATTERN
 
 _pipeline_conf = load_pipeline_config()
 
@@ -45,17 +44,6 @@ STAGE_RECURSION_LIMITS = _pipeline_conf.get('stage_recursion_limits') or {
 
 # ── 结构化解析失败时是否 fallback 独立 parser (pipeline.yml 开关) ──
 STRUCTURED_OUTPUT_FALLBACK = _pipeline_conf.get('structured_output_fallback', True)
-
-# ── 诊断名 → 专科映射 (Stage3 确定性分科, 与 data/ 子目录一致) ──
-DEPT_KEYWORDS = {
-    '心血管内科': ['心', '血压', '冠', '心绞痛', '心衰', '心肌梗', '心律'],
-    '呼吸内科': ['肺', '哮喘', '呼吸', 'COPD', '支气管', '气胸', '咳嗽'],
-    '消化内科': ['溃疡', '胃', '肠', '肝', '胆', 'Hp', '消化', '食管', '胰'],
-    '内分泌科': ['糖尿', '甲状腺', '甲亢', '甲减', '代谢', '肥胖'],
-    '肾内科': ['肾', '尿', '蛋白尿', '水肿'],
-    '血液科': ['贫血', '白血病', '血小板', '血红蛋白'],
-    '骨科': ['骨', '关节', '骨折', '腰椎', '颈椎'],
-}
 
 
 def _stage_config(config: RunnableConfig, stage: str) -> RunnableConfig:
@@ -113,17 +101,6 @@ def _parse_output(parser, text: str, model_cls, stage_name: str):
         return None
 
 
-def _load_patient_ids() -> list[str]:
-    """直接读 CSV 获取已建档患者ID列表 (纯代码, 不经过工具/LLM)"""
-    path = get_abs_path(agent_conf['external_data_path'])
-    ids = set()
-    with open(path, 'r', encoding='utf-8') as f:
-        for row in csv.reader(f):
-            if row and row[0] and row[0] != 'patient_id':
-                ids.add(row[0].strip().strip('"').upper())
-    return sorted(ids)
-
-
 def _dept_for_diagnosis(diagnosis: str, primary_department: str) -> str:
     """按诊断名关键词确定性分科, 无匹配时用 Stage2 给出的主要专科"""
     for dept, keywords in DEPT_KEYWORDS.items():
@@ -178,11 +155,11 @@ def make_validate_node():
     """
     def node(state: PipelineState, config: RunnableConfig) -> dict:
         query = state.get('user_query', '')
-        patient_ids = _load_patient_ids()
+        patient_ids = list_patient_ids()
 
-        m = re.search(r'P\d{3,}', query.upper())
+        m = PATIENT_ID_PATTERN.search(query)
         if m:
-            pid = m.group(0)
+            pid = m.group(0).upper()
             if pid in patient_ids:
                 logger.info(f'[Validate] 患者{pid}校验通过')
                 return {
@@ -312,8 +289,6 @@ def make_stage_3_node(rag_tool):
                     diagnosis=c.diagnosis,
                     department_used=dept,
                     guideline_summary=str(raw),
-                    diagnostic_criteria='',
-                    recommended_tests='',
                 )
 
             # 并行检索 (MCP 持久事件循环支持并发)
